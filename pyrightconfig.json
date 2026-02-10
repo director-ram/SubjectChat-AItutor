@@ -1,0 +1,10 @@
+{
+  "include": ["apps/api"],
+  "exclude": ["**/node_modules", "**/.venv"],
+  "executionEnvironments": [
+    {
+      "root": "apps/api",
+      "extraPaths": ["."]
+    }
+  ]
+}

@@ -1,0 +1,23 @@
+.env
+
+# Node
+node_modules/
+dist/
+.vite/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# Python
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.vscode/
+
