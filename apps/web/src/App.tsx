@@ -1,191 +1,235 @@
-import { useState, useRef, useEffect } from "react";
+import React, { useEffect, useRef, useState } from "react";
+import ReactMarkdown from "react-markdown";
 import {
-  sendChat,
+  fetchSubjects,
+  sendChatStream,
   getNextQuestion,
   sendFeedback,
   getConversations,
   getConversation,
   saveConversation,
   deleteConversation,
+  getProfileNotes,
+  createCustomSubject,
+  deleteCustomSubject,
+  type Subject,
   type ChatMessage,
   type ConversationSummary,
+  type SubjectNotes,
 } from "./api";
-import "./App.css";
+import "./styles.css";
 
-const SUBJECTS = ["Math", "Physics", "Chemistry", "History", "Writing"];
+type View = "picker" | "chat" | "profile";
 
 interface MessageWithMeta extends ChatMessage {
   timestamp: Date;
-  feedback?: number; // -1, 0, 1
+  feedback?: number;
 }
 
-function App() {
-  const [selectedSubject, setSelectedSubject] = useState<string | null>(null);
+export const App: React.FC = () => {
+  const [subjects, setSubjects] = useState<Subject[]>([]);
+  const [subjectsLoading, setSubjectsLoading] = useState(true);
+
+  const [view, setView] = useState<View>("picker");
+  const [selectedSubjectId, setSelectedSubjectId] = useState<string | null>(null);
+  const [selectedSubjectName, setSelectedSubjectName] = useState<string>("");
+
   const [messages, setMessages] = useState<MessageWithMeta[]>([]);
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
   const [nextQuestion, setNextQuestion] = useState<string | null>(null);
-  const [view, setView] = useState<"chat" | "profile">("chat");
+
   const [showHistory, setShowHistory] = useState(false);
   const [history, setHistory] = useState<ConversationSummary[]>([]);
   const [currentConversationId, setCurrentConversationId] = useState<number | null>(null);
+
+  const [profileNotes, setProfileNotes] = useState<SubjectNotes[]>([]);
+  const [profileNotesLoading, setProfileNotesLoading] = useState(false);
+  const [regeneratingSubjectId, setRegeneratingSubjectId] = useState<string | null>(null);
+  const [notesError, setNotesError] = useState<Record<string, string>>({});
+  const [allConversations, setAllConversations] = useState<ConversationSummary[]>([]);
+
+  const [showCustomModal, setShowCustomModal] = useState(false);
+  const [customName, setCustomName] = useState("");
+  const [customDescription, setCustomDescription] = useState("");
+  const [customTeachingStyle, setCustomTeachingStyle] = useState("");
+  const [customSubmitting, setCustomSubmitting] = useState(false);
+  const [customError, setCustomError] = useState<string | null>(null);
+
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
 
+  // Load subjects on mount
   useEffect(() => {
-    // Smooth scroll with delay for better readability
-    const scrollToBottom = () => {
-      if (messagesEndRef.current) {
-        const container = messagesEndRef.current.parentElement;
-        if (container) {
-          const targetScroll = container.scrollHeight;
-          const startScroll = container.scrollTop;
-          const distance = targetScroll - startScroll - container.clientHeight;
-          
-          if (distance > 0) {
-            const duration = 800; // Smooth 800ms scroll
-            const startTime = performance.now();
-            
-            const easeOutCubic = (t: number) => 1 - Math.pow(1 - t, 3);
-            
-            const animateScroll = (currentTime: number) => {
-              const elapsed = currentTime - startTime;
-              const progress = Math.min(elapsed / duration, 1);
-              const easing = easeOutCubic(progress);
-              
-              container.scrollTop = startScroll + distance * easing;
-              
-              if (progress < 1) {
-                requestAnimationFrame(animateScroll);
-              }
-            };
-            
-            requestAnimationFrame(animateScroll);
-          }
-        }
+    let cancelled = false;
+    (async () => {
+      setSubjectsLoading(true);
+      try {
+        const data = await fetchSubjects();
+        if (!cancelled) setSubjects(data);
+      } catch {
+        if (!cancelled) setSubjects([]);
+      } finally {
+        if (!cancelled) setSubjectsLoading(false);
       }
-    };
-    
-    scrollToBottom();
+    })();
+    return () => { cancelled = true; };
+  }, []);
+
+  // When in chat view, load history for subject and next question
+  useEffect(() => {
+    if (view !== "chat" || !selectedSubjectId) return;
+    if (showHistory) {
+      getConversations(selectedSubjectId).then(setHistory).catch(() => setHistory([]));
+    }
+    getNextQuestion(selectedSubjectId).then((r) => setNextQuestion(r.question_text)).catch(() => setNextQuestion(null));
+  }, [view, selectedSubjectId, showHistory]);
+
+  // Scroll to bottom when messages change
+  useEffect(() => {
+    messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages]);
 
+  // Auto-resize textarea
   useEffect(() => {
-    if (selectedSubject && showHistory) {
-      loadHistory();
-    }
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selectedSubject, showHistory]);
-
-  useEffect(() => {
-    // Auto-resize textarea based on content
-    if (textareaRef.current) {
-      textareaRef.current.style.height = "auto";
-      const scrollHeight = textareaRef.current.scrollHeight;
-      const maxHeight = 120; // Max 5-6 lines
-      textareaRef.current.style.height = Math.min(scrollHeight, maxHeight) + "px";
-    }
+    const ta = textareaRef.current;
+    if (!ta) return;
+    ta.style.height = "auto";
+    ta.style.height = Math.min(ta.scrollHeight, 120) + "px";
   }, [input]);
 
-  const loadHistory = async () => {
-    if (!selectedSubject) return;
-    try {
-      const conversations = await getConversations(selectedSubject);
-      setHistory(conversations);
-    } catch (err) {
-      console.error(err);
-    }
-  };
-
-  const handleSubjectChange = (subj: string) => {
-    setSelectedSubject(subj);
+  const handleSelectSubject = (subject: Subject) => {
+    setSelectedSubjectId(subject.id);
+    setSelectedSubjectName(subject.name);
     setMessages([]);
     setNextQuestion(null);
-    setView("chat");
-    setShowHistory(false);
     setCurrentConversationId(null);
-    fetchNextQuestion(subj);
+    setView("chat");
   };
 
-  const fetchNextQuestion = async (subj: string) => {
-    try {
-      const res = await getNextQuestion(subj);
-      setNextQuestion(res.question_text);
-    } catch (err) {
-      console.error(err);
-    }
+  const handleChangeSubject = () => {
+    setSelectedSubjectId(null);
+    setSelectedSubjectName("");
+    setMessages([]);
+    setNextQuestion(null);
+    setShowHistory(false);
+    setCurrentConversationId(null);
+    setView("picker");
+  };
+
+  const loadHistory = () => {
+    if (!selectedSubjectId) return;
+    getConversations(selectedSubjectId).then(setHistory).catch(() => setHistory([]));
   };
 
   const handleSend = async () => {
-    if (!input.trim() || !selectedSubject || loading) return;
+    if (!input.trim() || !selectedSubjectId || loading) return;
 
-    const userMsg: MessageWithMeta = { role: "user", content: input.trim(), timestamp: new Date() };
-    const newMessages = [...messages, userMsg];
+    const userMsg: MessageWithMeta = {
+      role: "user",
+      content: input.trim(),
+      timestamp: new Date(),
+    };
+    const newMessages: MessageWithMeta[] = [...messages, userMsg];
     setMessages(newMessages);
     setInput("");
     setLoading(true);
 
+    const assistantMsg: MessageWithMeta = {
+      role: "assistant",
+      content: "",
+      timestamp: new Date(),
+    };
+    setMessages((prev) => [...prev, assistantMsg]);
+
     try {
-      const res = await sendChat({
-        subject_id: selectedSubject,
-        messages: newMessages.map(m => ({ role: m.role, content: m.content })),
-      });
-      const assistantMsg: MessageWithMeta = { ...res.assistant, timestamp: new Date() };
-      setMessages([...newMessages, assistantMsg]);
-      fetchNextQuestion(selectedSubject);
+      await sendChatStream(
+        {
+          subject_id: selectedSubjectId,
+          messages: newMessages.map((m) => ({ role: m.role, content: m.content })),
+        },
+        (chunk) => {
+          setMessages((prev) => {
+            const next = [...prev];
+            const last = next[next.length - 1];
+            if (last?.role === "assistant")
+              next[next.length - 1] = { ...last, content: last.content + chunk };
+            return next;
+          });
+        }
+      );
+      getNextQuestion(selectedSubjectId).then((r) => setNextQuestion(r.question_text)).catch(() => {});
     } catch (err) {
       console.error(err);
-      alert("Failed to get response. Check that the API is running.");
+      setMessages((prev) => {
+        const next = [...prev];
+        const last = next[next.length - 1];
+        if (last?.role === "assistant")
+          next[next.length - 1] = {
+            ...last,
+            content: last.content || "Failed to get response. Check that the API is running.",
+          };
+        return next;
+      });
     } finally {
       setLoading(false);
     }
   };
 
   const handleFeedback = async (messageIndex: number, rating: number) => {
-    if (!selectedSubject) return;
+    if (!selectedSubjectId) return;
     const message = messages[messageIndex];
     const userQuestion = messageIndex > 0 ? messages[messageIndex - 1]?.content : undefined;
-    
     try {
       await sendFeedback({
         message_index: messageIndex,
         rating,
-        subject_id: selectedSubject,
+        subject_id: selectedSubjectId,
         message_content: message.content,
         user_question: userQuestion,
       });
-      setMessages(prev => prev.map((m, i) => i === messageIndex ? { ...m, feedback: rating } : m));
+      setMessages((prev) =>
+        prev.map((m, i) => (i === messageIndex ? { ...m, feedback: rating } : m))
+      );
     } catch (err) {
       console.error(err);
     }
   };
 
   const handleSaveConversation = async () => {
-    if (!selectedSubject || messages.length === 0) return;
-    const title = messages[0]?.content.slice(0, 50) + (messages[0]?.content.length > 50 ? "..." : "");
+    if (!selectedSubjectId || messages.length === 0) return;
+    const firstContent = messages[0]?.content || "";
+    const title = firstContent.slice(0, 50) + (firstContent.length > 50 ? "..." : "");
     try {
       const res = await saveConversation({
-        subject_id: selectedSubject,
+        subject_id: selectedSubjectId,
         title,
-        messages: messages.map(m => ({ role: m.role, content: m.content })),
+        messages: messages.map((m) => ({ role: m.role, content: m.content })),
       });
       setCurrentConversationId(res.id);
       alert("Conversation saved!");
       loadHistory();
     } catch (err) {
       console.error(err);
-      alert("Failed to save conversation");
+      alert("Failed to save conversation.");
     }
   };
 
   const handleLoadConversation = async (id: number) => {
     try {
       const conv = await getConversation(id);
-      setMessages(conv.messages.map(m => ({ ...m, timestamp: new Date() })));
+      setMessages(
+        conv.messages.map((m) => ({
+          role: m.role,
+          content: m.content,
+          timestamp: new Date(),
+        }))
+      );
       setCurrentConversationId(id);
       setShowHistory(false);
     } catch (err) {
       console.error(err);
-      alert("Failed to load conversation");
+      alert("Failed to load conversation.");
     }
   };
 
@@ -194,191 +238,359 @@ function App() {
     try {
       await deleteConversation(id);
       loadHistory();
+      setAllConversations((prev) => prev.filter((c) => c.id !== id));
       if (currentConversationId === id) {
         setMessages([]);
         setCurrentConversationId(null);
       }
     } catch (err) {
       console.error(err);
-      alert("Failed to delete conversation");
+      alert("Failed to delete conversation.");
     }
   };
 
   const handleUseNextQuestion = () => {
-    if (nextQuestion) {
-      setInput(nextQuestion);
+    if (nextQuestion) setInput(nextQuestion);
+  };
+
+  const openProfile = () => {
+    setView("profile");
+    setNotesError({});
+    setProfileNotesLoading(true);
+    getProfileNotes()
+      .then(setProfileNotes)
+      .catch(() => setProfileNotes([]))
+      .finally(() => setProfileNotesLoading(false));
+    getConversations()
+      .then(setAllConversations)
+      .catch(() => setAllConversations([]));
+  };
+
+  const handleRefreshAllNotes = () => {
+    setNotesError({});
+    setProfileNotesLoading(true);
+    getProfileNotes()
+      .then(setProfileNotes)
+      .catch(() => setProfileNotes([]))
+      .finally(() => setProfileNotesLoading(false));
+  };
+
+  const handleCreateCustomSubject = async (e: React.FormEvent) => {
+    e.preventDefault();
+    const name = customName.trim();
+    if (!name) {
+      setCustomError("Name is required");
+      return;
+    }
+    setCustomError(null);
+    setCustomSubmitting(true);
+    try {
+      const created = await createCustomSubject({
+        name,
+        description: customDescription.trim() || undefined,
+        teaching_style: customTeachingStyle.trim() || undefined,
+      });
+      setShowCustomModal(false);
+      setCustomName("");
+      setCustomDescription("");
+      setCustomTeachingStyle("");
+      setSelectedSubjectId(created.id);
+      setSelectedSubjectName(created.name);
+      setMessages([]);
+      setNextQuestion(null);
+      setCurrentConversationId(null);
+      setView("chat");
+    } catch (err) {
+      setCustomError(err instanceof Error ? err.message : "Failed to create subject");
+    } finally {
+      setCustomSubmitting(false);
     }
   };
 
-  if (!selectedSubject) {
+  const handleDeleteCustomSubject = async (subjectId: string, e: React.MouseEvent) => {
+    e.stopPropagation();
+    if (!confirm("Delete this subject? Its saved conversations will also be deleted.")) return;
+    try {
+      await deleteCustomSubject(subjectId);
+      const updated = await fetchSubjects();
+      setSubjects(updated);
+      if (selectedSubjectId === subjectId) {
+        setSelectedSubjectId(null);
+        setSelectedSubjectName("");
+        setView("picker");
+      }
+    } catch (err) {
+      alert(err instanceof Error ? err.message : "Failed to delete");
+    }
+  };
+
+  const handleRegenerateNotes = (subjectId: string) => {
+    setRegeneratingSubjectId(subjectId);
+    setNotesError((e) => ({ ...e, [subjectId]: "" }));
+    getProfileNotes(subjectId)
+      .then((data) => {
+        setProfileNotes((prev) => {
+          const rest = prev.filter((n) => n.subject_id !== subjectId);
+          return data.length ? [...rest, data[0]] : rest;
+        });
+      })
+      .catch((err) =>
+        setNotesError((e) => ({ ...e, [subjectId]: err instanceof Error ? err.message : "Failed to generate notes" }))
+      )
+      .finally(() => setRegeneratingSubjectId(null));
+  };
+
+  // --- Picker view ---
+  if (view === "picker") {
     return (
-      <div style={{ padding: "2rem", maxWidth: "600px", margin: "auto" }}>
-        <h1 style={{ marginBottom: "1rem" }}>SubjectChat</h1>
-        <p style={{ marginBottom: "1.5rem", color: "#64748b" }}>
-          AI tutoring for multiple subjects. Pick a subject to start.
-        </p>
-        <div style={{ display: "flex", flexDirection: "column", gap: "0.75rem" }}>
-          {SUBJECTS.map((s) => (
+      <div className="app-root app-picker">
+        <header className="app-header">
+          <h1>SubjectChat</h1>
+          <p className="subtitle">AI tutoring for multiple subjects. Pick a subject or create a custom one.</p>
+        </header>
+        <main className="picker-main">
+          {subjectsLoading && <p className="muted">Loading subjects…</p>}
+          <div className="picker-subjects">
+            {subjects.map((s) => (
+              <div
+                key={s.id}
+                className="picker-subject-row"
+                onClick={() => handleSelectSubject(s)}
+              >
+                <div className="picker-subject-btn">
+                  <span className="picker-subject-name">{s.name}</span>
+                  <span className="picker-subject-desc">{s.description}</span>
+                </div>
+                {s.is_custom && (
+                  <button
+                    type="button"
+                    className="picker-subject-delete"
+                    onClick={(e) => handleDeleteCustomSubject(s.id, e)}
+                    title="Delete subject"
+                  >
+                    🗑
+                  </button>
+                )}
+              </div>
+            ))}
             <button
-              key={s}
-              onClick={() => handleSubjectChange(s)}
-              style={{ padding: "1rem", fontSize: "1.1rem" }}
+              type="button"
+              className="picker-subject-btn picker-custom-trigger"
+              onClick={() => setShowCustomModal(true)}
             >
-              {s}
+              <span className="picker-subject-name">+ Custom subject</span>
+              <span className="picker-subject-desc">Create your own subject and save it for future use.</span>
             </button>
-          ))}
-        </div>
+          </div>
+        </main>
+
+        {showCustomModal && (
+          <div className="modal-overlay" onClick={() => !customSubmitting && setShowCustomModal(false)}>
+            <div className="modal-panel" onClick={(e) => e.stopPropagation()}>
+              <h3>New custom subject</h3>
+              <p className="muted small">Add a subject to use in chat. It will be saved and appear in Profile & Notes when you have saved conversations.</p>
+              <form onSubmit={handleCreateCustomSubject}>
+                {customError && <p className="notes-error">{customError}</p>}
+                <div className="field">
+                  <label>Subject name *</label>
+                  <input
+                    type="text"
+                    value={customName}
+                    onChange={(e) => setCustomName(e.target.value)}
+                    placeholder="e.g. Linear Algebra"
+                    required
+                  />
+                </div>
+                <div className="field">
+                  <label>Description (optional)</label>
+                  <textarea
+                    value={customDescription}
+                    onChange={(e) => setCustomDescription(e.target.value)}
+                    placeholder="What topics or level?"
+                    rows={2}
+                  />
+                </div>
+                <div className="field">
+                  <label>Teaching style (optional)</label>
+                  <textarea
+                    value={customTeachingStyle}
+                    onChange={(e) => setCustomTeachingStyle(e.target.value)}
+                    placeholder="e.g. Many examples, step by step"
+                    rows={2}
+                  />
+                </div>
+                <div className="modal-actions">
+                  <button type="button" className="btn btn-secondary" onClick={() => setShowCustomModal(false)} disabled={customSubmitting}>
+                    Cancel
+                  </button>
+                  <button type="submit" className="btn btn-primary" disabled={customSubmitting}>
+                    {customSubmitting ? "Creating…" : "Create & open chat"}
+                  </button>
+                </div>
+              </form>
+            </div>
+          </div>
+        )}
       </div>
     );
   }
 
+  // --- Profile view ---
   if (view === "profile") {
     return (
-      <div style={{ display: "flex", flexDirection: "column", height: "100vh" }}>
-        <header style={{ background: "linear-gradient(135deg, #1e293b 0%, #334155 100%)", color: "white", padding: "1rem", display: "flex", justifyContent: "space-between", alignItems: "center", boxShadow: "0 2px 12px rgba(0,0,0,0.15)" }}>
-          <h2 style={{ margin: 0 }}>Profile & Notes</h2>
-          <button
-            onClick={() => {
-              setView("chat");
-              if (selectedSubject) loadHistory();
-            }}
-            style={{ background: "#334155" }}
-          >
+      <div className="app-root app-profile">
+        <header className="app-header app-header-bar">
+          <h2>Profile & Notes</h2>
+          <button type="button" className="btn btn-secondary" onClick={() => setView("chat")}>
             Back to Chat
           </button>
         </header>
-        <div style={{ flex: 1, padding: "2rem", overflowY: "auto", background: "#f8fafc" }}>
-          <h3 style={{ marginTop: 0 }}>All Conversations</h3>
-          <button
-            onClick={async () => {
-              try {
-                const allConvs = await getConversations();
-                setHistory(allConvs);
-              } catch (err) {
-                console.error(err);
-              }
-            }}
-            style={{ marginBottom: "1rem" }}
-          >
-            Load All Conversations
-          </button>
-          {history.length === 0 && (
-            <p style={{ color: "#64748b" }}>No saved conversations yet. Start chatting and save your conversations!</p>
-          )}
-          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(300px, 1fr))", gap: "1rem" }}>
-            {history.map((conv) => (
-              <div
-                key={conv.id}
-                style={{
-                  background: "white",
-                  borderRadius: "8px",
-                  padding: "1.25rem",
-                  border: "1px solid #e2e8f0",
-                  boxShadow: "0 1px 3px rgba(0,0,0,0.1)",
-                }}
+        <main className="profile-main">
+          <section className="profile-section">
+            <h3>Notes by subject</h3>
+            <p className="muted small">
+              Structured notes generated by the LLM from your chat history for each subject (Phase 1).
+            </p>
+            <div className="profile-notes-actions">
+              <button
+                type="button"
+                className="btn btn-secondary"
+                onClick={handleRefreshAllNotes}
+                disabled={profileNotesLoading}
               >
-                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "start", marginBottom: "0.75rem" }}>
-                  <span style={{ background: "#dbeafe", color: "#1e40af", padding: "0.25rem 0.5rem", borderRadius: "4px", fontSize: "0.75rem", fontWeight: 600 }}>
-                    {conv.subject_id}
-                  </span>
+                {profileNotesLoading ? "Loading…" : "Refresh all notes"}
+              </button>
+            </div>
+            {!profileNotesLoading && profileNotes.length === 0 && (
+              <p className="muted">No notes yet. Save conversations in a subject, then refresh notes.</p>
+            )}
+            {profileNotes.map((n) => (
+              <div key={n.subject_id} className="notes-card">
+                <div className="notes-card-header">
+                  <h4 className="notes-subject">{n.subject_name}</h4>
                   <button
-                    onClick={() => handleDeleteConversation(conv.id)}
-                    style={{ background: "#ef4444", padding: "0.25rem 0.5rem", fontSize: "0.75rem" }}
+                    type="button"
+                    className="btn quick-action-btn"
+                    onClick={() => handleRegenerateNotes(n.subject_id)}
+                    disabled={regeneratingSubjectId === n.subject_id}
                   >
-                    Delete
+                    {regeneratingSubjectId === n.subject_id ? "Generating…" : "Regenerate"}
                   </button>
                 </div>
-                <h4 style={{ margin: "0 0 0.5rem 0", fontSize: "1rem", lineHeight: 1.4 }}>{conv.title}</h4>
-                <div style={{ fontSize: "0.8rem", color: "#64748b", marginBottom: "0.75rem" }}>
-                  {conv.message_count} messages • {new Date(conv.updated_at).toLocaleDateString()}
+                {notesError[n.subject_id] && (
+                  <p className="notes-error">{notesError[n.subject_id]}</p>
+                )}
+                <div className="notes-content">
+                  <ReactMarkdown>{n.notes}</ReactMarkdown>
                 </div>
-                <button
-                  onClick={() => {
-                    handleLoadConversation(conv.id);
-                    setView("chat");
-                  }}
-                  style={{ width: "100%", background: "#3b82f6", padding: "0.5rem" }}
-                >
-                  Open
-                </button>
               </div>
             ))}
-          </div>
-        </div>
+          </section>
+          <section className="profile-section">
+            <h3>All conversations</h3>
+            <button
+              type="button"
+              className="btn btn-secondary"
+              onClick={() =>
+                getConversations().then(setAllConversations).catch(() => setAllConversations([]))
+              }
+            >
+              Load all
+            </button>
+            {allConversations.length === 0 && (
+              <p className="muted">No saved conversations yet.</p>
+            )}
+            <div className="conversations-grid">
+              {allConversations.map((conv) => (
+                <div key={conv.id} className="conv-card">
+                  <div className="conv-card-header">
+                    <span className="conv-badge">{conv.subject_id}</span>
+                    <button
+                      type="button"
+                      className="btn btn-danger small"
+                      onClick={() => handleDeleteConversation(conv.id)}
+                    >
+                      Delete
+                    </button>
+                  </div>
+                  <h4 className="conv-title">{conv.title}</h4>
+                  <p className="conv-meta">
+                    {conv.message_count} messages · {new Date(conv.updated_at).toLocaleDateString()}
+                  </p>
+                  <button
+                    type="button"
+                    className="btn btn-primary full"
+                    onClick={() => {
+                      handleLoadConversation(conv.id);
+                      setView("chat");
+                      setSelectedSubjectId(conv.subject_id);
+                      const subj = subjects.find((s) => s.id === conv.subject_id);
+                      setSelectedSubjectName(subj?.name ?? conv.subject_id);
+                    }}
+                  >
+                    Open
+                  </button>
+                </div>
+              ))}
+            </div>
+          </section>
+        </main>
       </div>
     );
   }
 
+  // --- Chat view ---
   return (
-    <div style={{ display: "flex", flexDirection: "column", height: "100vh" }}>
-      <header style={{ background: "linear-gradient(135deg, #1e293b 0%, #334155 100%)", color: "white", padding: "1rem", display: "flex", justifyContent: "space-between", alignItems: "center", boxShadow: "0 2px 12px rgba(0,0,0,0.15)" }}>
-        <div style={{ display: "flex", gap: "1rem", alignItems: "center" }}>
-          <h2 style={{ margin: 0 }}>SubjectChat — {selectedSubject}</h2>
-          <button
-            onClick={() => setSelectedSubject(null)}
-            style={{ background: "#334155", fontSize: "0.9rem" }}
-          >
-            Change Subject
+    <div className="app-root app-chat">
+      <header className="app-header app-header-bar">
+        <div className="header-left">
+          <h2>SubjectChat — {selectedSubjectName}</h2>
+          <button type="button" className="btn btn-secondary" onClick={handleChangeSubject}>
+            Change subject
           </button>
         </div>
-        <div style={{ display: "flex", gap: "0.75rem" }}>
+        <div className="header-actions">
           <button
-            onClick={() => setShowHistory(!showHistory)}
-            style={{ background: "#334155", fontSize: "0.9rem" }}
+            type="button"
+            className="btn btn-secondary"
+            onClick={() => {
+              setShowHistory((h) => !h);
+              if (!showHistory) loadHistory();
+            }}
           >
-            {showHistory ? "Hide" : "Show"} History
+            {showHistory ? "Hide" : "Show"} history
           </button>
           {messages.length > 0 && (
-            <button
-              onClick={handleSaveConversation}
-              style={{ background: "#059669", fontSize: "0.9rem" }}
-            >
-              💾 Save
+            <button type="button" className="btn btn-save" onClick={handleSaveConversation}>
+              Save chat
             </button>
           )}
-          <button
-            onClick={() => setView("profile")}
-            style={{ background: "#334155", fontSize: "0.9rem" }}
-          >
+          <button type="button" className="btn btn-secondary" onClick={openProfile}>
             Profile
           </button>
         </div>
       </header>
 
-      <div style={{ flex: 1, display: "flex", overflow: "hidden" }}>
+      <div className="chat-layout">
         {showHistory && (
-          <div style={{ width: "300px", borderRight: "1px solid #cbd5e1", background: "white", overflowY: "auto", padding: "1rem" }}>
-            <h3 style={{ marginTop: 0, fontSize: "1rem", marginBottom: "1rem" }}>Past Conversations</h3>
-            {history.length === 0 && (
-              <p style={{ color: "#64748b", fontSize: "0.9rem" }}>No saved conversations yet.</p>
-            )}
+          <aside className="history-sidebar">
+            <h3>Past conversations</h3>
+            {history.length === 0 && <p className="muted small">No saved conversations yet.</p>}
             {history.map((conv) => (
               <div
                 key={conv.id}
-                style={{
-                  padding: "0.75rem",
-                  marginBottom: "0.5rem",
-                  background: currentConversationId === conv.id ? "#dbeafe" : "#f8fafc",
-                  borderRadius: "6px",
-                  cursor: "pointer",
-                  border: "1px solid #e2e8f0",
-                }}
+                className={`history-item ${currentConversationId === conv.id ? "active" : ""}`}
                 onClick={() => handleLoadConversation(conv.id)}
               >
-                <div style={{ fontSize: "0.9rem", fontWeight: 500, marginBottom: "0.25rem", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
-                  {conv.title}
-                </div>
-                <div style={{ fontSize: "0.75rem", color: "#64748b", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                <div className="history-item-title">{conv.title}</div>
+                <div className="history-item-meta">
                   <span>{conv.message_count} msgs</span>
                   <button
+                    type="button"
+                    className="btn btn-danger small"
                     onClick={(e) => {
                       e.stopPropagation();
                       handleDeleteConversation(conv.id);
-                    }}
-                    style={{
-                      background: "#ef4444",
-                      padding: "0.15rem 0.4rem",
-                      fontSize: "0.7rem",
                     }}
                   >
                     Delete
@@ -386,277 +598,126 @@ function App() {
                 </div>
               </div>
             ))}
-          </div>
+          </aside>
         )}
 
-      <div style={{ flex: 1, overflowY: "auto", padding: "1.5rem", background: "linear-gradient(to bottom, #f8fafc 0%, #f1f5f9 100%)", scrollBehavior: "smooth", scrollPaddingTop: "20px" }}>
-        {messages.length === 0 && (
-          <div style={{ textAlign: "center", marginTop: "4rem", color: "#64748b" }}>
-            <div style={{ fontSize: "3rem", marginBottom: "1rem" }}>💬</div>
-            <p style={{ fontSize: "1.1rem" }}>Ask a {selectedSubject} question to start</p>
-          </div>
-        )}
-        {messages.map((m, i) => {
-          const isUser = m.role === "user";
-          const time = m.timestamp.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
-          return (
-            <div
-              key={i}
-              style={{
-                display: "flex",
-                marginBottom: "1.5rem",
-                flexDirection: isUser ? "row-reverse" : "row",
-                gap: "0.75rem",
-                animation: "slideIn 0.3s ease-out",
-              }}
-            >
-              <div
-                style={{
-                  width: "40px",
-                  height: "40px",
-                  borderRadius: "50%",
-                  background: isUser ? "linear-gradient(135deg, #667eea 0%, #764ba2 100%)" : "linear-gradient(135deg, #f093fb 0%, #f5576c 100%)",
-                  display: "flex",
-                  alignItems: "center",
-                  justifyContent: "center",
-                  flexShrink: 0,
-                  fontSize: "1.2rem",
-                }}
-              >
-                {isUser ? "👤" : "🤖"}
+        <div className="chat-area">
+          <div className="messages-wrap">
+            {messages.length === 0 && (
+              <div className="empty-state">
+                <p>Ask a {selectedSubjectName} question to start.</p>
               </div>
-              <div style={{ maxWidth: "70%" }}>
-                <div
-                  style={{
-                    background: isUser 
-                      ? "linear-gradient(135deg, #3b82f6 0%, #2563eb 100%)" 
-                      : "linear-gradient(135deg, #ffffff 0%, #f8fafc 100%)",
-                    color: isUser ? "white" : "#1e293b",
-                    padding: "1rem",
-                    borderRadius: isUser ? "18px 18px 4px 18px" : "18px 18px 18px 4px",
-                    boxShadow: isUser 
-                      ? "0 2px 8px rgba(59, 130, 246, 0.25)" 
-                      : "0 2px 12px rgba(0, 0, 0, 0.08)",
-                    border: isUser ? "none" : "1px solid #e2e8f0",
-                  }}
-                >
-                  <div style={{ whiteSpace: "pre-wrap", lineHeight: "1.6" }}>{m.content}</div>
-                </div>
-                <div
-                  style={{
-                    display: "flex",
-                    alignItems: "center",
-                    gap: "0.75rem",
-                    marginTop: "0.5rem",
-                    fontSize: "0.75rem",
-                    color: "#94a3b8",
-                  }}
-                >
-                  <span>{time}</span>
-                  {!isUser && (
-                    <div style={{ display: "flex", gap: "0.25rem" }}>
-                      <button
-                        onClick={() => handleFeedback(i, 1)}
-                        style={{
-                          background: m.feedback === 1 ? "#22c55e" : "#e2e8f0",
-                          color: m.feedback === 1 ? "white" : "#64748b",
-                          border: "none",
-                          padding: "0.25rem 0.5rem",
-                          borderRadius: "4px",
-                          cursor: "pointer",
-                          fontSize: "0.875rem",
-                        }}
-                        title="Helpful"
-                      >
-                        👍
-                      </button>
-                      <button
-                        onClick={() => handleFeedback(i, -1)}
-                        style={{
-                          background: m.feedback === -1 ? "#ef4444" : "#e2e8f0",
-                          color: m.feedback === -1 ? "white" : "#64748b",
-                          border: "none",
-                          padding: "0.25rem 0.5rem",
-                          borderRadius: "4px",
-                          cursor: "pointer",
-                          fontSize: "0.875rem",
-                        }}
-                        title="Not helpful"
-                      >
-                        👎
-                      </button>
-                    </div>
-                  )}
-                </div>
-              </div>
-            </div>
-          );
-        })}
-        {loading && (
-          <div
-            style={{
-              display: "flex",
-              marginBottom: "1.5rem",
-              gap: "0.75rem",
-              animation: "slideIn 0.3s ease-out",
-            }}
-          >
-            <div
-              style={{
-                width: "40px",
-                height: "40px",
-                borderRadius: "50%",
-                background: "linear-gradient(135deg, #f093fb 0%, #f5576c 100%)",
-                display: "flex",
-                alignItems: "center",
-                justifyContent: "center",
-                flexShrink: 0,
-                fontSize: "1.2rem",
-              }}
-            >
-              🤖
-            </div>
-            <div style={{ maxWidth: "70%" }}>
-              <div
-                style={{
-                  background: "linear-gradient(135deg, #ffffff 0%, #f8fafc 100%)",
-                  color: "#1e293b",
-                  padding: "1rem",
-                  borderRadius: "18px 18px 18px 4px",
-                  boxShadow: "0 2px 12px rgba(0, 0, 0, 0.08)",
-                  border: "1px solid #e2e8f0",
-                }}
-              >
-                <div className="dot-flashing">
-                  <div></div>
-                  <div></div>
-                  <div></div>
-                </div>
-              </div>
-            </div>
-          </div>
-        )}
-        <div ref={messagesEndRef} />
-      </div>
-      </div>
-
-      <div style={{ borderTop: "1px solid #cbd5e1", background: "linear-gradient(to top, #ffffff 0%, #f8fafc 100%)", padding: "0.75rem", boxShadow: "0 -2px 12px rgba(0,0,0,0.04)" }}>
-        {nextQuestion && (
-          <div
-            style={{
-              background: "linear-gradient(135deg, #fef3c7 0%, #fef9e7 100%)",
-              padding: "0.6rem 0.85rem",
-              borderRadius: "10px",
-              marginBottom: "0.6rem",
-              cursor: "pointer",
-              border: "1px solid #fde68a",
-              display: "flex",
-              alignItems: "center",
-              gap: "0.6rem",
-              transition: "all 0.3s cubic-bezier(0.4, 0, 0.2, 1)",
-              boxShadow: "0 2px 8px rgba(252, 211, 77, 0.15)",
-            }}
-            onClick={handleUseNextQuestion}
-            onMouseEnter={(e) => {
-              e.currentTarget.style.transform = "translateY(-2px)";
-              e.currentTarget.style.boxShadow = "0 4px 12px rgba(252, 211, 77, 0.25)";
-            }}
-            onMouseLeave={(e) => {
-              e.currentTarget.style.transform = "translateY(0)";
-              e.currentTarget.style.boxShadow = "0 2px 8px rgba(252, 211, 77, 0.15)";
-            }}
-          >
-            <span style={{ fontSize: "1.2rem" }}>💡</span>
-            <div style={{ flex: 1 }}>
-              <span style={{ fontSize: "0.85rem", color: "#92400e", fontWeight: 500 }}>{nextQuestion}</span>
-            </div>
-            <span style={{ fontSize: "0.75rem", color: "#92400e", opacity: 0.7 }}>Click to use</span>
-          </div>
-        )}
-
-        <div style={{ display: "flex", gap: "0.5rem", alignItems: "flex-end" }}>
-          <textarea
-            ref={textareaRef}
-            value={input}
-            onChange={(e) => setInput(e.target.value)}
-            onKeyDown={(e) => {
-              if (e.key === "Enter" && !e.shiftKey) {
-                e.preventDefault();
-                handleSend();
-              }
-            }}
-            placeholder="Ask a question..."
-            rows={1}
-            style={{
-              flex: 1,
-              resize: "none",
-              padding: "0.75rem",
-              borderRadius: "12px",
-              border: "2px solid #e2e8f0",
-              fontSize: "0.95rem",
-              fontFamily: "inherit",
-              outline: "none",
-              transition: "border-color 0.2s",
-              minHeight: "44px",
-              maxHeight: "120px",
-              overflowY: "auto",
-            }}
-            onFocus={(e) => e.currentTarget.style.borderColor = "#3b82f6"}
-            onBlur={(e) => e.currentTarget.style.borderColor = "#e2e8f0"}
-            disabled={loading}
-          />
-          <button
-            onClick={handleSend}
-            disabled={loading || !input.trim()}
-            style={{
-              width: "48px",
-              height: "48px",
-              borderRadius: "12px",
-              background: loading || !input.trim() ? "#cbd5e1" : "linear-gradient(135deg, #3b82f6 0%, #2563eb 100%)",
-              border: "none",
-              cursor: loading || !input.trim() ? "not-allowed" : "pointer",
-              display: "flex",
-              alignItems: "center",
-              justifyContent: "center",
-              fontSize: "1.5rem",
-              transition: "all 0.2s",
-              boxShadow: loading || !input.trim() ? "none" : "0 2px 8px rgba(59, 130, 246, 0.3)",
-            }}
-            onMouseEnter={(e) => {
-              if (!loading && input.trim()) {
-                e.currentTarget.style.transform = "translateY(-2px)";
-                e.currentTarget.style.boxShadow = "0 4px 12px rgba(59, 130, 246, 0.4)";
-              }
-            }}
-            onMouseLeave={(e) => {
-              e.currentTarget.style.transform = "translateY(0)";
-              e.currentTarget.style.boxShadow = loading || !input.trim() ? "none" : "0 2px 8px rgba(59, 130, 246, 0.3)";
-            }}
-            title={loading ? "Sending..." : "Send message (Enter)"}
-          >
-            {loading ? (
-              <span style={{ color: "white", fontSize: "1.2rem" }}>⏳</span>
-            ) : (
-              <svg
-                width="24"
-                height="24"
-                viewBox="0 0 24 24"
-                fill="none"
-                stroke="white"
-                strokeWidth="2"
-                strokeLinecap="round"
-                strokeLinejoin="round"
-                style={{ transform: "rotate(45deg)", marginLeft: "2px", marginBottom: "2px" }}
-              >
-                <path d="M22 2L11 13" />
-                <path d="M22 2L15 22L11 13L2 9L22 2Z" />
-              </svg>
             )}
-          </button>
+            {messages.map((m, i) => {
+              const isUser = m.role === "user";
+              return (
+                <div
+                  key={i}
+                  className={`message-row ${isUser ? "user" : "assistant"}`}
+                >
+                  <div className="message-avatar">{isUser ? "You" : "Tutor"}</div>
+                  <div className="message-bubble">
+                    <div className="message-content">{m.content}</div>
+                    <div className="message-meta">
+                      <span>{m.timestamp.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</span>
+                      {!isUser && (
+                        <div className="feedback-btns">
+                          <button
+                            type="button"
+                            className={m.feedback === 1 ? "active" : ""}
+                            onClick={() => handleFeedback(i, 1)}
+                            title="Helpful"
+                          >
+                            👍
+                          </button>
+                          <button
+                            type="button"
+                            className={m.feedback === -1 ? "active" : ""}
+                            onClick={() => handleFeedback(i, -1)}
+                            title="Not helpful"
+                          >
+                            👎
+                          </button>
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                </div>
+              );
+            })}
+            {loading && (
+              <div className="message-row assistant">
+                <div className="message-avatar">Tutor</div>
+                <div className="message-bubble">
+                  <div className="typing-dots">
+                    <span /><span /><span />
+                  </div>
+                </div>
+              </div>
+            )}
+            <div ref={messagesEndRef} />
+          </div>
+
+          {nextQuestion && (
+            <div className="next-question-bar" onClick={handleUseNextQuestion}>
+              <span className="next-q-icon">💡</span>
+              <span className="next-q-text">{nextQuestion}</span>
+              <span className="next-q-hint">Click to use</span>
+            </div>
+          )}
+
+          <div className="quick-actions">
+            <span className="quick-actions-label">Quick actions:</span>
+            <button
+              type="button"
+              className="btn quick-action-btn"
+              onClick={() => setInput((prev) => prev + (prev ? " " : "") + "Give me a hint (don't give the full answer yet).")}
+            >
+              Hint
+            </button>
+            <button
+              type="button"
+              className="btn quick-action-btn"
+              onClick={() => setInput((prev) => prev + (prev ? " " : "") + "Explain this step by step.")}
+            >
+              Explain
+            </button>
+            <button
+              type="button"
+              className="btn quick-action-btn"
+              onClick={() => setInput((prev) => prev + (prev ? " " : "") + "Give me a practice problem on this topic.")}
+            >
+              Practice
+            </button>
+          </div>
+
+          <form
+            className="composer"
+            onSubmit={(e) => {
+              e.preventDefault();
+              handleSend();
+            }}
+          >
+            <textarea
+              ref={textareaRef}
+              value={input}
+              onChange={(e) => setInput(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter" && !e.shiftKey) {
+                  e.preventDefault();
+                  handleSend();
+                }
+              }}
+              placeholder="Ask a question..."
+              rows={1}
+              disabled={loading}
+            />
+            <button type="submit" className="btn btn-send" disabled={loading || !input.trim()}>
+              {loading ? "…" : "Send"}
+            </button>
+          </form>
         </div>
       </div>
     </div>
   );
-}
-
-export default App;
+};

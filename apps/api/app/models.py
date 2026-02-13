@@ -50,3 +50,14 @@ class Message(Base):
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), nullable=False)
 
     conversation = relationship("Conversation", back_populates="messages")
+
+
+class CustomSubject(Base):
+    """User-created subjects; subject_id in conversations is 'custom-{id}'."""
+    __tablename__ = "custom_subjects"
+
+    id = Column(Integer, primary_key=True, index=True)
+    name = Column(String(128), nullable=False)
+    description = Column(Text, default="", nullable=False)
+    teaching_style = Column(Text, default="", nullable=False)
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), nullable=False)

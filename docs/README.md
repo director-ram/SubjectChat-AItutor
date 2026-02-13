@@ -4,3 +4,4 @@
 - Technical Requirements (TRD): [TRD.md](TRD.md)
 - ML personalization plan: [ml-personalization.md](ml-personalization.md)
 - Local Llama 3.2 setup: [local-llama-setup.md](local-llama-setup.md)
+- **Next steps (roadmap):** [next-steps.md](next-steps.md)
