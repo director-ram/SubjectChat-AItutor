@@ -31,10 +31,11 @@
 
 - Lightweight blocklist in `app/moderation.py`; chat and chat/stream refuse disallowed content and return a safe message.
 
-### 4. Subject config as JSON (maintainability)
+### 4. ~~Subject config as JSON (maintainability)~~ ✅ Done
 
 - **Why:** Product plan and TRD say subject configs should be versioned JSON.
 - **What:** Move subject definitions from code to `subjects/<subjectId>.json` (name, description, teaching_style, constraints). Backend loads these at startup or on first use; keep fallback to current in-code defaults.
+- **Done:** Default subjects live in `apps/api/app/subjects/*.json`; `get_default_subjects()` loads from JSON with in-code fallback; list_subjects and system prompts use this config.
 
 ### 5. Rate limiting (Phase 1 — TRD)
 
@@ -69,4 +70,4 @@
 2. ~~Hint / Explain / Practice~~ ✅  
 3. ~~**Fully develop profile notes (Phase 1)**~~ ✅ — Markdown rendering, Refresh all, Regenerate per subject, loading & error states.  
 4. ~~**Basic moderation**~~ ✅  
-5. Subject JSON config, rate limiting, markdown/math in chat.
+5. ~~Subject JSON config~~ ✅; rate limiting, markdown/math in chat.

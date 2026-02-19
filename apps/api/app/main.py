@@ -117,7 +117,8 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 
-from app.llm import build_subject_system_prompt, chat_completion, chat_completion_stream
+from app.llm import chat_completion, chat_completion_stream
+from app.subjects import build_subject_system_prompt, get_default_subjects
 from app.moderation import check_user_content, REFUSAL_MESSAGE
 from app.schemas import (
     ChatRequest,
@@ -134,7 +135,6 @@ from app.schemas import (
 from app.settings import settings
 from app.database import init_db, get_db
 from app.models import Conversation, Message, Feedback, CustomSubject
-from app.subjects import get_default_subjects
 
 app = FastAPI(title="SubjectChat API")
 
