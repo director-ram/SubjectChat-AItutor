@@ -116,7 +116,7 @@ async def chat(
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
-
+from sqlalchemy import func, case
 from app.llm import chat_completion, chat_completion_stream
 from app.subjects import build_subject_system_prompt, get_default_subjects
 from app.moderation import check_user_content, REFUSAL_MESSAGE
@@ -290,6 +290,58 @@ def get_feedback_stats(subject_id: str | None = None) -> dict:
         return {"error": "Database not configured"}
 
 
+@app.get("/api/feedback/interest")
+def get_feedback_interest(min_feedback: int = 1) -> list[dict]:
+    """
+    Aggregate feedback per subject to approximate user interest/satisfaction.
+
+    Returns one entry per subject_id with:
+    - total_feedback
+    - likes / dislikes
+    - like_percentage
+    """
+    try:
+        with get_db() as db:
+            likes_expr = func.sum(
+                case((Feedback.rating == 1, 1), else_=0)
+            ).label("likes")
+            dislikes_expr = func.sum(
+                case((Feedback.rating == -1, 1), else_=0)
+            ).label("dislikes")
+            total_expr = func.count(Feedback.id).label("total")
+
+            rows = (
+                db.query(
+                    Feedback.subject_id,
+                    total_expr,
+                    likes_expr,
+                    dislikes_expr,
+                )
+                .group_by(Feedback.subject_id)
+                .having(total_expr >= min_feedback)
+                .order_by(Feedback.subject_id)
+                .all()
+            )
+
+            result: list[dict] = []
+            for subject_id, total, likes, dislikes in rows:
+                likes = likes or 0
+                dislikes = dislikes or 0
+                like_pct = round(likes / total * 100, 1) if total else 0.0
+                result.append(
+                    {
+                        "subject_id": subject_id,
+                        "total_feedback": int(total),
+                        "likes": int(likes),
+                        "dislikes": int(dislikes),
+                        "like_percentage": like_pct,
+                    }
+                )
+            return result
+    except RuntimeError:
+        return []
+
+
 @app.get("/api/feedback/export")
 def export_feedback(subject_id: str | None = None, limit: int = 100) -> list[dict]:
     """Export feedback data for fine-tuning and analysis."""
@@ -410,7 +462,7 @@ async def chat_stream(req: ChatRequest):
 
 @app.get("/api/recommendation/next-question", response_model=NextQuestionResponse)
 async def next_question(subject_id: str) -> NextQuestionResponse:
-    # MVP: stub recommendation. Later: read from progress/events and generate adaptively.
+    # Use LLM for recommendation; incorporate feedback interest when available.
     if not settings.openai_base_url:
         return NextQuestionResponse(
             subject_id=subject_id,
@@ -419,9 +471,38 @@ async def next_question(subject_id: str) -> NextQuestionResponse:
             stub=True,
         )
 
+    # Derive a simple interest/satisfaction signal from feedback for this subject.
+    interest_summary = "No prior feedback available for this subject yet."
+    try:
+        with get_db() as db:
+            total = db.query(Feedback).filter(Feedback.subject_id == subject_id).count()
+            if total > 0:
+                likes = (
+                    db.query(Feedback)
+                    .filter(Feedback.subject_id == subject_id, Feedback.rating == 1)
+                    .count()
+                )
+                dislikes = (
+                    db.query(Feedback)
+                    .filter(Feedback.subject_id == subject_id, Feedback.rating == -1)
+                    .count()
+                )
+                like_pct = round(likes / total * 100, 1) if total else 0.0
+                interest_summary = (
+                    f"For this subject you have {total} feedback ratings: "
+                    f"{likes} likes, {dislikes} dislikes (like rate {like_pct}%). "
+                    "Use this as a rough signal of what has worked well or poorly so far."
+                )
+    except RuntimeError:
+        # DB not configured; keep default summary.
+        pass
+
     prompt = (
         "You are generating ONE next practice question for a student. "
-        "Return only the question text (no solution)."
+        "Return only the question text (no solution).\n\n"
+        f"Feedback summary for this subject based on thumbs up/down: {interest_summary}\n"
+        "If the like rate has been low, prioritize a clear, engaging, bite-sized question that may improve satisfaction. "
+        "If the like rate has been high, continue with similar level and style of questions."
     )
 
     result = await chat_completion(
